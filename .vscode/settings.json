@@ -54,6 +54,19 @@
         "sstream": "cpp",
         "stdexcept": "cpp",
         "streambuf": "cpp",
-        "typeinfo": "cpp"
-    }
+        "typeinfo": "cpp",
+        "bit": "cpp",
+        "compare": "cpp",
+        "concepts": "cpp",
+        "numbers": "cpp",
+        "ranges": "cpp",
+        "stop_token": "cpp",
+        "semaphore": "cpp",
+        "codecvt": "cpp",
+        "csignal": "cpp",
+        "complex": "cpp"
+    },
+    "C_Cpp.default.compilerPath": "/usr/bin/gcc-11",
+    "cursor.general.enableHttp2ProxyWorkaround": true,
+    "cursor.general.disableHttp2": true
 }

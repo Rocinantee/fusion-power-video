@@ -15,14 +15,19 @@
 cmake_minimum_required(VERSION 3.6)
 
 project(FusionPowerVideo CXX)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
+set(OpenCV_DIR /home/wukong/Code/opencv-4.10.0/build/OpenCVConfig.cmake)
 
 find_package(PkgConfig REQUIRED)
+find_package(OpenCV REQUIRED)
 pkg_check_modules(Brotli REQUIRED IMPORTED_TARGET libbrotlienc libbrotlidec)
+include_directories(${OpenCV_INCLUDE_DIRS})
 
-add_library(fusion_power_video STATIC fusion_power_video.h fusion_power_video.cc)
-target_link_libraries(fusion_power_video PRIVATE pthread PkgConfig::Brotli)
+add_library(fusion_power_video STATIC fusion_power_video.h fusion_power_video.cc camera_format_handler.h camera_format_handler.cc )
+
+
+target_link_libraries(fusion_power_video PRIVATE pthread PkgConfig::Brotli ${OpenCV_LIBRARIES})
 
 set_target_properties(fusion_power_video PROPERTIES PUBLIC_HEADER "fusion_power_video.h")
 INSTALL(TARGETS fusion_power_video
@@ -30,7 +35,7 @@ INSTALL(TARGETS fusion_power_video
         PUBLIC_HEADER DESTINATION include
 )
 
-foreach (executable IN ITEMS benchmark encode decode)
+foreach (executable IN ITEMS benchmark encode decode encode_test decode_test streaming_decode)
   add_executable("${executable}" "${executable}.cc")
   target_link_libraries("${executable}" fusion_power_video)
 endforeach ()
