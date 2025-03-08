@@ -7,6 +7,8 @@
 #include "fusion_power_video.h"
 #include "fusion_power_video.cc"
 #include "camera_format_handler.h"
+#include <opencv2/core.hpp>
+#include <opencv2/highgui.hpp>
 
 using namespace std;
 using namespace fpvc;
@@ -15,7 +17,7 @@ int encodeCameraFile()
 {
   // 文件设置
   const std::string input_file = "/NFSdata/data1/EastCameraData2024/145425/145425.seq";
-  const std::string output_file = "/home/wukong/Code/fusion-power-video/output/output-test.fpv";
+  const std::string output_file = "/home/wukong/Code/fusion-power-video/output/145425-output-16bit.fpv";
   std::ifstream infile(input_file, std::ios::binary);
   std::ofstream outfile(output_file, std::ios::binary);
 
@@ -65,7 +67,7 @@ int encodeCameraFile()
   std::cout << "- Handler frame size: " << handler.FrameSize() << " bytes" << std::endl;
 
   // 使用shift=8初始化编码器，用于8位数据
-  const int shift = 8; // 重要：对于8位数据使用8
+  const int shift = 0; // 重要：对于8位数据使用8
   const bool big_endian = false;
   const int num_threads = 8;
   fpvc::Encoder encoder(num_threads, shift, big_endian);
@@ -86,7 +88,7 @@ int encodeCameraFile()
   // 解除1000帧的限制 - 处理所有帧或限制更大的帧数
   const size_t max_frames = total_frames; // 或设置一个更合理的限制，比如10000
 
-  for (size_t i = 0; i < max_frames; i++) {
+  for (size_t i = 0; i < total_frames; i++) {
     if (!infile.read(reinterpret_cast<char*>(frame_buffer.data()), handler.FrameSize())) {
       std::cerr << "Reached end of file after " << i << " frames" << std::endl;
       break;
@@ -111,17 +113,16 @@ int encodeCameraFile()
     for (size_t j = 0; j < width * height; j++) {
       buffer_16bit[j] = static_cast<uint16_t>(current_frame.data[j]);
     }
-
+      
     try {
       if (first_frame) {
         // 使用增量帧初始化编码器
         std::cout << "Initializing encoder with first frame..." << std::endl;
         encoder.Init(buffer_16bit.data(), width, height, write_callback, nullptr);
         first_frame = false;
-      } else {
+      } 
         // 压缩每一帧
-        encoder.CompressFrame(buffer_16bit.data(), write_callback, nullptr);
-      }
+      encoder.CompressFrame(buffer_16bit.data(), write_callback, nullptr);  
       frames_processed++;
     } catch (const std::exception& e) {
       std::cerr << "Error processing frame " << i << ": " << e.what() << std::endl;
@@ -130,7 +131,7 @@ int encodeCameraFile()
 
     // 每100帧显示进度
     if (i % 100 == 0 || i == max_frames - 1) {
-      std::cout << "Processed " << i+1 << "/" << max_frames << " frames. "
+      std::cout << "Processed " << i << "/" << max_frames << " frames. "
                 << "Bytes written: " << total_bytes_written << std::endl;
     }
   }

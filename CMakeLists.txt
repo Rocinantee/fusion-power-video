@@ -35,7 +35,7 @@ INSTALL(TARGETS fusion_power_video
         PUBLIC_HEADER DESTINATION include
 )
 
-foreach (executable IN ITEMS benchmark encode decode encode_test decode_test streaming_decode)
+foreach (executable IN ITEMS benchmark encode decode encode_test decode_test streaming_decode intergrated_encode_decode_seq_file)
   add_executable("${executable}" "${executable}.cc")
   target_link_libraries("${executable}" fusion_power_video)
 endforeach ()
