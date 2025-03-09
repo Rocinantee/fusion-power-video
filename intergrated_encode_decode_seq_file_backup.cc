@@ -7,7 +7,6 @@
 #include <vector>
 #include <limits>
 #include <algorithm>
-#include <filesystem>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 
@@ -18,17 +17,17 @@ using namespace std;
 using namespace fpvc;
 
 int main() {
-    // Hard-coded input file
+    // 硬编码输入文件
     const std::string input_file = "/NFSdata/data1/EastCameraData2024/145425/145425.seq";
 
-    // Open input file
+    // 打开输入文件
     std::ifstream infile(input_file, std::ios::binary);
     if (!infile) {
         std::cerr << "Failed to open input file: " << input_file << std::endl;
         return 1;
     }
 
-    // Initialize CameraFormatHandler and read header
+    // 初始化 CameraFormatHandler 并读取 header
     CameraFormatHandler handler;
     std::vector<uint8_t> original_header(handler.HeaderSize());
     if (!infile.read(reinterpret_cast<char*>(original_header.data()), handler.HeaderSize())) {
@@ -40,13 +39,12 @@ int main() {
         return 1;
     }
 
-    // Get header info
+    // 获取头部信息
     const CameraHeader &header_info = handler.GetHeaderInfo();
     const size_t width = header_info.width;
     const size_t height = header_info.height;
     const uint16_t bit_depth = header_info.bit_depth;
     size_t total_frames = header_info.kept_frame_count;
-    // For testing purpose, limit to 4000 frames
     total_frames = 4000;
 
     std::cout << "Input file info:" << std::endl;
@@ -54,30 +52,31 @@ int main() {
     std::cout << "- Bit depth: " << bit_depth << std::endl;
     std::cout << "- Total frames (from header): " << total_frames << std::endl;
 
-    // Get per-frame size from handler
+    // 每帧原始数据大小（通过 handler 获取）
     size_t frame_buffer_size = handler.FrameSize();
     std::cout << "- Frame size: " << frame_buffer_size << " bytes" << std::endl;
 
-    // Read all frames and store (convert 8-bit data to 16-bit)
+    // 读取所有帧数据并存入 original_frames
     std::vector< std::vector<uint16_t> > original_frames;
     std::vector<uint8_t> frame_buffer(frame_buffer_size);
     size_t frame_index = 0;
     while (infile.read(reinterpret_cast<char*>(frame_buffer.data()), frame_buffer_size)) {
-        // Extract camera frame
+        // 提取相机帧
         CameraFrame current_frame;
         size_t pos = 0;
         if (!handler.ExtractFrame(frame_buffer.data(), frame_buffer_size, &pos, &current_frame)) {
             std::cerr << "Error extracting frame " << frame_index << ". Skipping." << std::endl;
             continue;
         }
+        // 检查提取后的数据大小是否符合预期
         if (current_frame.data.size() != width * height) {
             std::cerr << "Frame " << frame_index << " has unexpected size: " 
                       << current_frame.data.size() << " vs expected " << width * height << std::endl;
             continue;
         }
+        // 转换成 16 位数据（此处简单将 8 位数据转换到 16 位，可以根据需要扩展）
         std::vector<uint16_t> frame_16bit(width * height);
         for (size_t j = 0; j < width * height; j++) {
-            // Simply cast 8-bit value to 16-bit (you can modify if a bit-shift is required)
             frame_16bit[j] = static_cast<uint16_t>(current_frame.data[j]);
         }
         original_frames.push_back(std::move(frame_16bit));
@@ -90,15 +89,14 @@ int main() {
     }
     std::cout << "Total frames read: " << original_frames.size() << std::endl;
 
-    // ENCODING PHASE: Encode all frames using Encoder.
-    // For 8-bit data, we use shift=0 and big_endian=false.
+    // 编码阶段：使用 Encoder 对所有帧进行编码
+    // hard code: 对于8位数据，此处 shift 设为 0，big_endian 为 false，线程数设为8
     const int shift = 0;
     const bool big_endian = false;
     const int num_threads = 8;
     Encoder encoder(num_threads, shift, big_endian);
-    // Encoded data will be stored in this vector.
     std::vector<uint8_t> encoded_data;
-    // Write callback: Append generated data to encoded_data.
+    // 写回调：将生成的编码数据追加到 encoded_data 中
     auto write_callback = [&encoded_data](const uint8_t* data, size_t size, void* /*payload*/) {
         encoded_data.insert(encoded_data.end(), data, data + size);
     };
@@ -107,7 +105,7 @@ int main() {
     for (size_t i = 0; i < original_frames.size(); i++) {
         uint16_t* img = original_frames[i].data();
         if (!initialized) {
-            // Use the first frame to initialize the encoder (delta frame)
+            // 使用第一帧初始化编码器，作为 delta_frame
             encoder.Init(img, width, height, write_callback, nullptr);
             initialized = true;
         }
@@ -116,32 +114,9 @@ int main() {
     encoder.Finish(write_callback, nullptr);
     std::cout << "Encoding complete, encoded data size: " << encoded_data.size() << " bytes" << std::endl;
 
-    // Write the encoded data to disk at the specified path.
-    std::string encoded_file = "/home/wukong/Code/fusion-power-video/output/145425-output-encoded.fpv";
-    std::ofstream encoded_out(encoded_file, std::ios::binary);
-    if (!encoded_out) {
-        std::cerr << "Failed to open output file for writing encoded data: " << encoded_file << std::endl;
-        return 1;
-    }
-    encoded_out.write(reinterpret_cast<const char*>(encoded_data.data()), encoded_data.size());
-    encoded_out.close();
-    std::cout << "Encoded file written to disk." << std::endl;
-
-    // DECODING PHASE: Read the encoded file and use RandomAccessDecoder.
-    std::ifstream encoded_in(encoded_file, std::ios::binary);
-    if (!encoded_in) {
-        std::cerr << "Failed to open encoded file for decoding: " << encoded_file << std::endl;
-        return 1;
-    }
-    encoded_in.seekg(0, std::ios::end);
-    size_t encoded_file_size = encoded_in.tellg();
-    encoded_in.seekg(0, std::ios::beg);
-    std::vector<uint8_t> encoded_file_data(encoded_file_size);
-    encoded_in.read(reinterpret_cast<char*>(encoded_file_data.data()), encoded_file_size);
-    encoded_in.close();
-
+    // 解码阶段：使用 RandomAccessDecoder 对编码数据进行解码，并检验每帧数据
     RandomAccessDecoder decoder;
-    if (!decoder.Init(encoded_file_data.data(), encoded_file_data.size())) {
+    if (!decoder.Init(encoded_data.data(), encoded_data.size())) {
         std::cerr << "Decoder failed to initialize" << std::endl;
         return 1;
     }
@@ -154,13 +129,6 @@ int main() {
     }
 
     bool all_match = true;
-    // Create output folder for decoded frames if it does not exist.
-    std::string decoded_output_dir = "/home/wukong/Code/fusion-power-video/output/int-output/";
-    if (!std::filesystem::exists(decoded_output_dir)) {
-        std::filesystem::create_directories(decoded_output_dir);
-    }
-
-    // For each frame, decode and write the output image.
     for (size_t i = 0; i < original_frames.size(); i++) {
         std::vector<uint16_t> decoded_frame(width * height, 0);
         if (!decoder.DecodeFrame(i, decoded_frame.data())) {
@@ -168,16 +136,17 @@ int main() {
             all_match = false;
             continue;
         }
-        // Convert the 16-bit decoded frame to 8-bit by simply casting; adjust if a shift is needed.
         std::vector<uint8_t> decoded_frame_8bit(width * height);
         for (size_t j = 0; j < width * height; j++) {
             decoded_frame_8bit[j] = static_cast<uint8_t>(decoded_frame[j]);
         }
+        //write decoded frame
         cv::Mat frame_Mat = cv::Mat(height, width, CV_8UC1, decoded_frame_8bit.data());
-        std::string output_path = decoded_output_dir + "decoded_8bit_" + std::to_string(i) + ".bmp";
+        std::string output_path = "/home/wukong/Code/fusion-power-video/output/int-output/decoded_8bit_" + std::to_string(i) + ".bmp";
         cv::imwrite(output_path, frame_Mat);
+        
 
-        // Compare with original frame (if desired)
+        // 比较解码数据与原始数据是否一致
         if (!std::equal(original_frames[i].begin(), original_frames[i].end(), decoded_frame.begin())) {
             std::cerr << "Frame " << i << " mismatch between original and decoded data" << std::endl;
             all_match = false;
