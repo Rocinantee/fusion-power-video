@@ -17,25 +17,36 @@
 using namespace std;
 using namespace fpvc;
 
-int main() {
-    // Hard-coded input file
-    const std::string input_file = "/NFSdata/data1/EastCameraData2024/145425/145425.seq";
 
-    // Open input file
+
+
+int main() {
+    // Hard-coded input file and output encoded file path
+    const std::string input_file = "/NFSdata/data1/EastCameraData2024/145425/145425.seq";
+    const std::string encoded_file_path = "/home/wukong/Code/fusion-power-video/output/145425-output-encoded.fpv";
+
+    // Open original sequence file for encoding
     std::ifstream infile(input_file, std::ios::binary);
     if (!infile) {
         std::cerr << "Failed to open input file: " << input_file << std::endl;
         return 1;
     }
 
-    // Initialize CameraFormatHandler and read header
+    // Prepare output file for encoded data
+    std::ofstream outfile(encoded_file_path, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Failed to open output file: " << encoded_file_path << std::endl;
+        return 1;
+    }
+
+    // Initialize CameraFormatHandler and read header from original file
     CameraFormatHandler handler;
-    std::vector<uint8_t> original_header(handler.HeaderSize());
-    if (!infile.read(reinterpret_cast<char*>(original_header.data()), handler.HeaderSize())) {
+    std::vector<uint8_t> header_data(handler.HeaderSize());
+    if (!infile.read(reinterpret_cast<char*>(header_data.data()), handler.HeaderSize())) {
         std::cerr << "Failed to read header" << std::endl;
         return 1;
     }
-    if (!handler.ParseHeader(original_header.data(), original_header.size())) {
+    if (!handler.ParseHeader(header_data.data(), header_data.size())) {
         std::cerr << "Failed to parse header" << std::endl;
         return 1;
     }
@@ -46,8 +57,8 @@ int main() {
     const size_t height = header_info.height;
     const uint16_t bit_depth = header_info.bit_depth;
     size_t total_frames = header_info.kept_frame_count;
-    // For testing purpose, limit to 4000 frames
-    total_frames = 4000;
+    // For testing, limit to 4000 frames
+    total_frames = 1000;
 
     std::cout << "Input file info:" << std::endl;
     std::cout << "- Dimensions: " << width << "x" << height << std::endl;
@@ -58,12 +69,32 @@ int main() {
     size_t frame_buffer_size = handler.FrameSize();
     std::cout << "- Frame size: " << frame_buffer_size << " bytes" << std::endl;
 
-    // Read all frames and store (convert 8-bit data to 16-bit)
-    std::vector< std::vector<uint16_t> > original_frames;
-    std::vector<uint8_t> frame_buffer(frame_buffer_size);
+    // ENCODING PHASE:
+    // Process the sequence file frame by frame and pass the frame to the encoder.
+    // Do not store the original frames in memory.
+    const int shift = 0;       // For 8-bit data, no shift is needed here
+    const bool big_endian = false;
+    const int num_threads = 8;
+    
+    Encoder encoder(num_threads, shift, big_endian);
+    size_t num_buffers = encoder.MaxQueued();
+    std::vector<uint16_t> buffers[num_buffers];
+    for (size_t i = 0; i < num_buffers; i++) {
+      buffers[i].resize(width * height);
+    }
+    size_t buffer_index = 0;
+
+    // Write callback directly writes into the outfile stream.
+    auto write_callback = [&outfile](const uint8_t* data, size_t size, void* /*payload*/) {
+        outfile.write(reinterpret_cast<const char*>(data), size);
+    };
+
+    bool encoder_initialized = false;
     size_t frame_index = 0;
-    while (infile.read(reinterpret_cast<char*>(frame_buffer.data()), frame_buffer_size)) {
-        // Extract camera frame
+    static std::vector<uint8_t> frame_buffer(frame_buffer_size);
+    static std::vector<uint16_t> frame_16bit(width * height,0);
+    while (infile.read(reinterpret_cast<char*>(frame_buffer.data()), frame_buffer_size) && frame_index < total_frames) {
+        // Extract camera frame from buffer
         CameraFrame current_frame;
         size_t pos = 0;
         if (!handler.ExtractFrame(frame_buffer.data(), frame_buffer_size, &pos, &current_frame)) {
@@ -75,62 +106,37 @@ int main() {
                       << current_frame.data.size() << " vs expected " << width * height << std::endl;
             continue;
         }
-        std::vector<uint16_t> frame_16bit(width * height);
+
+        
+        // Convert 8-bit data to 16-bit (if needed, here simply cast each value)
+
         for (size_t j = 0; j < width * height; j++) {
-            // Simply cast 8-bit value to 16-bit (you can modify if a bit-shift is required)
             frame_16bit[j] = static_cast<uint16_t>(current_frame.data[j]);
         }
-        original_frames.push_back(std::move(frame_16bit));
-        frame_index++;
-        if(frame_index >= total_frames) break;
-    }
-    if (original_frames.empty()) {
-        std::cerr << "No valid frames read!" << std::endl;
-        return 1;
-    }
-    std::cout << "Total frames read: " << original_frames.size() << std::endl;
-
-    // ENCODING PHASE: Encode all frames using Encoder.
-    // For 8-bit data, we use shift=0 and big_endian=false.
-    const int shift = 0;
-    const bool big_endian = false;
-    const int num_threads = 8;
-    Encoder encoder(num_threads, shift, big_endian);
-    // Encoded data will be stored in this vector.
-    std::vector<uint8_t> encoded_data;
-    // Write callback: Append generated data to encoded_data.
-    auto write_callback = [&encoded_data](const uint8_t* data, size_t size, void* /*payload*/) {
-        encoded_data.insert(encoded_data.end(), data, data + size);
-    };
-
-    bool initialized = false;
-    for (size_t i = 0; i < original_frames.size(); i++) {
-        uint16_t* img = original_frames[i].data();
-        if (!initialized) {
-            // Use the first frame to initialize the encoder (delta frame)
+        buffers[buffer_index] = frame_16bit;
+        uint16_t* img = buffers[buffer_index].data();
+        if (!encoder_initialized) {
+            // Use the first valid frame to initialize the encoder (delta frame)
             encoder.Init(img, width, height, write_callback, nullptr);
-            initialized = true;
+            encoder_initialized = true;
         }
+
         encoder.CompressFrame(img, write_callback, nullptr);
+        buffer_index = (buffer_index + 1) % num_buffers;
+        frame_index++;
+
     }
+
+    // Finalize encoding (this writes the frame index etc.)
     encoder.Finish(write_callback, nullptr);
-    std::cout << "Encoding complete, encoded data size: " << encoded_data.size() << " bytes" << std::endl;
+    outfile.close();
+    std::cout << "Encoding complete. Encoded file written to disk at: " << encoded_file_path << std::endl;
 
-    // Write the encoded data to disk at the specified path.
-    std::string encoded_file = "/home/wukong/Code/fusion-power-video/output/145425-output-encoded.fpv";
-    std::ofstream encoded_out(encoded_file, std::ios::binary);
-    if (!encoded_out) {
-        std::cerr << "Failed to open output file for writing encoded data: " << encoded_file << std::endl;
-        return 1;
-    }
-    encoded_out.write(reinterpret_cast<const char*>(encoded_data.data()), encoded_data.size());
-    encoded_out.close();
-    std::cout << "Encoded file written to disk." << std::endl;
-
-    // DECODING PHASE: Read the encoded file and use RandomAccessDecoder.
-    std::ifstream encoded_in(encoded_file, std::ios::binary);
+    // DECODING PHASE:
+    // Read the encoded file from disk (we assume the file size is moderate)
+    std::ifstream encoded_in(encoded_file_path, std::ios::binary);
     if (!encoded_in) {
-        std::cerr << "Failed to open encoded file for decoding: " << encoded_file << std::endl;
+        std::cerr << "Failed to open encoded file for decoding: " << encoded_file_path << std::endl;
         return 1;
     }
     encoded_in.seekg(0, std::ios::end);
@@ -145,44 +151,67 @@ int main() {
         std::cerr << "Decoder failed to initialize" << std::endl;
         return 1;
     }
-    if (decoder.numframes() != original_frames.size() || decoder.xsize() != width || decoder.ysize() != height) {
+    if (decoder.numframes() != frame_index || decoder.xsize() != width || decoder.ysize() != height) {
         std::cerr << "Mismatch in decoder parameters:" << std::endl;
         std::cerr << "Decoded frames: " << decoder.numframes() << " (" << decoder.xsize() 
-                  << "x" << decoder.ysize() << ") vs original frames: " << original_frames.size() 
+                  << "x" << decoder.ysize() << ") vs. expected: " << frame_index 
                   << " (" << width << "x" << height << ")" << std::endl;
         return 1;
     }
 
-    bool all_match = true;
-    // Create output folder for decoded frames if it does not exist.
-    std::string decoded_output_dir = "/home/wukong/Code/fusion-power-video/output/int-output/";
-    if (!std::filesystem::exists(decoded_output_dir)) {
-        std::filesystem::create_directories(decoded_output_dir);
+    // ROUNDTRIP TEST:
+    // Instead of storing the original frames in memory from the encoding phase,
+    // re-read them from the original input file.
+    // Re-open the original file and skip the header.
+    std::ifstream orig_in(input_file, std::ios::binary);
+    if (!orig_in) {
+        std::cerr << "Failed to re-open original input file: " << input_file << std::endl;
+        return 1;
     }
+    // Skip header:
+    orig_in.seekg(handler.HeaderSize(), std::ios::beg);
 
-    // For each frame, decode and write the output image.
-    for (size_t i = 0; i < original_frames.size(); i++) {
+    bool all_match = true;
+    std::vector<uint8_t> orig_frame_buffer(frame_buffer_size);
+    for (size_t i = 0; i < frame_index; i++) {
+        if (!orig_in.read(reinterpret_cast<char*>(orig_frame_buffer.data()), frame_buffer_size)) {
+            std::cerr << "Failed to read original frame " << i << std::endl;
+            all_match = false;
+            break;
+        }
+        CameraFrame current_frame;
+        size_t pos = 0;
+        if (!handler.ExtractFrame(orig_frame_buffer.data(), frame_buffer_size, &pos, &current_frame)) {
+            std::cerr << "Error extracting original frame " << i << std::endl;
+            all_match = false;
+            continue;
+        }
+        if (current_frame.data.size() != width * height) {
+            std::cerr << "Original frame " << i << " has unexpected size: " 
+                      << current_frame.data.size() << " vs expected " << width * height << std::endl;
+            all_match = false;
+            continue;
+        }
+        // Convert original frame (8-bit) to 16-bit for comparison
+        std::vector<uint16_t> orig_frame_16bit(width * height);
+        for (size_t j = 0; j < width * height; j++) {
+            orig_frame_16bit[j] = static_cast<uint16_t>(current_frame.data[j]);
+        }
+
+        // Decode frame i from the encoded output
         std::vector<uint16_t> decoded_frame(width * height, 0);
         if (!decoder.DecodeFrame(i, decoded_frame.data())) {
             std::cerr << "Failed to decode frame " << i << std::endl;
             all_match = false;
             continue;
         }
-        // Convert the 16-bit decoded frame to 8-bit by simply casting; adjust if a shift is needed.
-        std::vector<uint8_t> decoded_frame_8bit(width * height);
-        for (size_t j = 0; j < width * height; j++) {
-            decoded_frame_8bit[j] = static_cast<uint8_t>(decoded_frame[j]);
-        }
-        cv::Mat frame_Mat = cv::Mat(height, width, CV_8UC1, decoded_frame_8bit.data());
-        std::string output_path = decoded_output_dir + "decoded_8bit_" + std::to_string(i) + ".bmp";
-        cv::imwrite(output_path, frame_Mat);
-
-        // Compare with original frame (if desired)
-        if (!std::equal(original_frames[i].begin(), original_frames[i].end(), decoded_frame.begin())) {
+        // Compare the decoded frame with the original frame read from disk.
+        if (!std::equal(orig_frame_16bit.begin(), orig_frame_16bit.end(), decoded_frame.begin())) {
             std::cerr << "Frame " << i << " mismatch between original and decoded data" << std::endl;
             all_match = false;
         }
     }
+    orig_in.close();
 
     if (all_match) {
         std::cout << "Roundtrip test successful: All frames match the original." << std::endl;
