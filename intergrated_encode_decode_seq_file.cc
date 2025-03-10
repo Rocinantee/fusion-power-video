@@ -53,7 +53,7 @@ bool encode_seq_file(const string &input_file,
     width = header_info.width;
     height = header_info.height;
     // 为了测试限制帧数，可设置为1000
-    size_t total_frames = 500;
+    size_t total_frames = header_info.kept_frame_count;
     cout << "Input file info:" << endl;
     cout << "- Dimensions: " << width << "x" << height << endl;
     cout << "- Total frames (from header): " << total_frames << endl;
@@ -217,6 +217,94 @@ bool random_access_decode(const string &input_file,
     return true;
 }
 
+bool streaming_decode(const string &input_file,
+    const string &encoded_file_path,
+    size_t encoded_frame_count,
+    size_t width,
+    size_t height,
+    CameraFormatHandler &handler)
+{
+    // 打开编码文件，以分块方式读取，而非一次全部加载
+    ifstream encoded_in(encoded_file_path, ios::binary);
+    if (!encoded_in) {
+    cerr << "Failed to open encoded file for streaming decode: " << encoded_file_path << endl;
+    return false;
+    }
+
+    // 打开原始文件，供 roundtrip 测试按帧读取原始数据
+    ifstream orig_in(input_file, ios::binary);
+    if (!orig_in) {
+    cerr << "Failed to open original input file: " << input_file << endl;
+    return false;
+    }
+    // 跳过头部数据
+    orig_in.seekg(handler.HeaderSize(), ios::beg);
+    size_t frame_buffer_size = handler.FrameSize();
+
+    // 创建 streaming decoder 对象
+    fpvc::StreamingDecoder decoder;
+    size_t frames_decoded = 0;
+    const size_t blocksize = 65536;
+    vector<uint8_t> block_buffer(blocksize);
+
+    // 回调 lambda：每解码一帧时从原始文件读取对应帧并进行验证
+    auto decode_callback = [&frames_decoded, width, height, frame_buffer_size, &handler, &orig_in]
+    (bool ok, const uint16_t* image, size_t xsize, size_t ysize, void* /*unused*/) {
+    if (!ok) {
+    cerr << "StreamingDecoder decode failed at frame " << frames_decoded << endl;
+    return;
+    }
+    // 读取对应的原始帧
+    vector<uint8_t> orig_frame_buffer(frame_buffer_size);
+    if (!orig_in.read(reinterpret_cast<char*>(orig_frame_buffer.data()), frame_buffer_size)) {
+    cerr << "Failed to read original frame " << frames_decoded << endl;
+    return;
+    }
+    // 提取原始帧数据
+    CameraFrame current_frame;
+    size_t pos = 0;
+    if (!handler.ExtractFrame(orig_frame_buffer.data(),
+                    orig_frame_buffer.size(),
+                    &pos, &current_frame))
+    {
+    cerr << "Error extracting original frame " << frames_decoded << endl;
+    return;
+    }
+    if (current_frame.data.size() != width * height) {
+    cerr << "Original frame " << frames_decoded << " unexpected size: "
+    << current_frame.data.size() << " vs expected " << width * height << endl;
+    return;
+    }
+    // 将8位数据转换为16位，保证与编码时一致
+    vector<uint16_t> orig_frame_16bit(width * height);
+    for (size_t j = 0; j < width * height; j++) {
+    orig_frame_16bit[j] = static_cast<uint16_t>(current_frame.data[j]);
+    }
+    if (!equal(orig_frame_16bit.begin(), orig_frame_16bit.end(), image)) {
+    cerr << "Frame " << frames_decoded << " mismatch between original and streaming decoded data" << endl;
+    }
+    frames_decoded++;
+    };
+
+    // 按块读取编码文件，并提交给 streaming decoder
+    while (!encoded_in.eof()) {
+    encoded_in.read(reinterpret_cast<char*>(block_buffer.data()), blocksize);
+    size_t bytes_read = encoded_in.gcount();
+    if (bytes_read > 0) {
+    decoder.Decode(block_buffer.data(), bytes_read, decode_callback, nullptr);
+    }
+    }
+
+    if (frames_decoded != encoded_frame_count) {
+    cerr << "Streaming roundtrip test failed: decoded " << frames_decoded
+    << " frames, expected " << encoded_frame_count << endl;
+    return false;
+    }
+    cout << "Streaming roundtrip test successful: All " << frames_decoded
+    << " frames match the original." << endl;
+    return true;
+}
+
 int main() {
     // 文件路径配置
     const string input_file = "/NFSdata/data1/EastCameraData2024/145425/145425.seq";
@@ -238,10 +326,18 @@ int main() {
     }
 
     // 执行随机存取解码以及 roundtrip test
-    if (!random_access_decode(input_file, encoded_file_path,
-                              encoded_frame_count, width, height, handler))
+    // if (!random_access_decode(input_file, encoded_file_path,
+    //                           encoded_frame_count, width, height, handler))
+    // {
+    //     cerr << "Decoding or verification failed." << endl;
+    //     return 1;
+    // }
+
+    // 执行流式解码以及 roundtrip test
+    if (!streaming_decode(input_file, encoded_file_path,
+                          encoded_frame_count, width, height, handler))
     {
-        cerr << "Decoding or verification failed." << endl;
+        cerr << "Streaming decoding or verification failed." << endl;
         return 1;
     }
 
